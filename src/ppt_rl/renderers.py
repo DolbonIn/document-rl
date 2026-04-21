@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import importlib
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from .artifacts import write_candidate_artifacts
 from .schemas import (
@@ -63,6 +64,43 @@ def _repair_hint(error_type: str | None) -> str | None:
     return hints.get(error_type)
 
 
+def _finalize_result(
+    output_dir: Path,
+    candidate: HtmlCandidate,
+    started: float,
+    visible_text: str,
+    screenshot_bytes: bytes | None,
+    diagnostics: RenderDiagnostics,
+    error_type: str | None,
+    page_errors: list[str] | None = None,
+    console_errors: list[str] | None = None,
+    failed_requests: list[str] | None = None,
+    network_violations: list[str] | None = None,
+) -> tuple[RenderResult, ArtifactRecord]:
+    artifact = write_candidate_artifacts(
+        output_dir,
+        candidate.candidate_id,
+        candidate.html,
+        visible_text,
+        screenshot_bytes=screenshot_bytes,
+    )
+    result = RenderResult(
+        candidate_id=candidate.candidate_id,
+        render_status="failure" if error_type is not None else "success",
+        error_type=error_type,
+        traceback="\n".join(page_errors) if page_errors else None,
+        console_errors=console_errors or [],
+        page_errors=page_errors or [],
+        failed_requests=failed_requests or [],
+        network_violations=network_violations or [],
+        render_time_ms=int((time.time() - started) * 1000),
+        screenshot_ready=artifact.screenshot_path is not None,
+        diagnostics=diagnostics,
+        repair_hint=_repair_hint(error_type),
+    )
+    return result, artifact
+
+
 @dataclass
 class FallbackRenderer:
     renderer_version: str = "fallback_renderer_v1"
@@ -76,47 +114,57 @@ class FallbackRenderer:
             candidate.html, visible_text, fallback_used=True
         )
         error_type = None
-        status = "success"
         if diagnostics.blank_page:
-            status = "failure"
             error_type = "blank_render"
         elif diagnostics.overflow_score >= 0.22:
-            status = "failure"
             error_type = "severe_overflow"
-        artifact = write_candidate_artifacts(
-            output_dir,
-            candidate.candidate_id,
-            candidate.html,
-            visible_text,
+        return _finalize_result(
+            output_dir=output_dir,
+            candidate=candidate,
+            started=started,
+            visible_text=visible_text,
             screenshot_bytes=None,
-        )
-        result = RenderResult(
-            candidate_id=candidate.candidate_id,
-            render_status=status,
-            error_type=error_type,
-            render_time_ms=int((time.time() - started) * 1000),
-            screenshot_ready=True,
             diagnostics=diagnostics,
-            repair_hint=_repair_hint(error_type),
+            error_type=error_type,
         )
-        return result, artifact
 
 
 @dataclass
 class PlaywrightRenderer:
-    renderer_version: str = "playwright_renderer_v1"
+    renderer_version: str = "playwright_renderer_v2"
+    _playwright: Any = field(default=None, init=False, repr=False)
+    _browser: Any = field(default=None, init=False, repr=False)
 
-    def render(
-        self, task: TaskSpec, candidate: HtmlCandidate, output_dir: Path
-    ) -> tuple[RenderResult, ArtifactRecord]:
+    def _ensure_browser(self) -> tuple[Any, type[Exception]]:
+        if self._browser is not None:
+            sync_api = importlib.import_module("playwright.sync_api")
+            return self._browser, getattr(sync_api, "TimeoutError")
+
         try:
             sync_api = importlib.import_module("playwright.sync_api")
-            PlaywrightTimeoutError = getattr(sync_api, "TimeoutError")
             sync_playwright = getattr(sync_api, "sync_playwright")
+            timeout_error = getattr(sync_api, "TimeoutError")
         except ImportError as exc:  # pragma: no cover - optional dependency
             raise RuntimeError(
                 "Playwright renderer requires the playwright package"
             ) from exc
+
+        self._playwright = sync_playwright().start()
+        self._browser = self._playwright.chromium.launch(headless=True)
+        return self._browser, timeout_error
+
+    def close(self) -> None:
+        if self._browser is not None:
+            self._browser.close()
+            self._browser = None
+        if self._playwright is not None:
+            self._playwright.stop()
+            self._playwright = None
+
+    def render(
+        self, task: TaskSpec, candidate: HtmlCandidate, output_dir: Path
+    ) -> tuple[RenderResult, ArtifactRecord]:
+        browser, playwright_timeout_error = self._ensure_browser()
 
         started = time.time()
         screenshot_bytes: bytes | None = None
@@ -126,35 +174,34 @@ class PlaywrightRenderer:
         failed_requests: list[str] = []
         network_violations: list[str] = []
         error_type: str | None = None
-        status = "success"
         diagnostics = RenderDiagnostics()
 
         try:
-            with sync_playwright() as playwright:
-                browser = playwright.chromium.launch(headless=True)
-                context = browser.new_context(
-                    viewport={
-                        "width": task.constraints.viewport.width,
-                        "height": task.constraints.viewport.height,
-                    },
-                    locale="en-US",
-                    timezone_id="UTC",
-                    java_script_enabled=False,
-                )
+            context = browser.new_context(
+                viewport={
+                    "width": task.constraints.viewport.width,
+                    "height": task.constraints.viewport.height,
+                },
+                locale="en-US",
+                timezone_id="UTC",
+                java_script_enabled=True,
+            )
+            try:
                 page = context.new_page()
 
-                def on_console(msg):
+                def on_console(msg: Any) -> None:
                     if msg.type == "error":
                         console_errors.append(msg.text)
 
-                def on_page_error(err):
+                def on_page_error(err: Exception) -> None:
                     page_errors.append(str(err))
 
                 page.on("console", on_console)
                 page.on("pageerror", on_page_error)
-                page.route("**/*", lambda route: route.abort())
                 page.set_content(
-                    candidate.html, wait_until="domcontentloaded", timeout=5000
+                    candidate.html,
+                    wait_until="networkidle",
+                    timeout=5000,
                 )
                 page.wait_for_timeout(300)
                 screenshot_bytes = page.screenshot(type="png")
@@ -175,72 +222,58 @@ class PlaywrightRenderer:
                     }
                     """
                 )
-                browser.close()
-                overflow_x = max(
-                    0, int(metrics["scrollWidth"] - metrics["clientWidth"])
-                )
-                overflow_y = max(
-                    0, int(metrics["scrollHeight"] - metrics["clientHeight"])
-                )
-                overflow_score = max(
-                    overflow_x / max(1, task.constraints.viewport.width),
-                    overflow_y / max(1, task.constraints.viewport.height),
-                )
-                blank_page = len(visible_text.strip()) < 8
-                diagnostics = RenderDiagnostics(
-                    blank_page=blank_page,
-                    horizontal_overflow_px=overflow_x,
-                    vertical_overflow_px=overflow_y,
-                    overflow_score=round(float(min(1.0, overflow_score)), 4),
-                    clipped_element_count=1 if overflow_score > 0.1 else 0,
-                    tiny_text_count=0,
-                    contrast_failure_count=0,
-                    dom_node_count=int(metrics["domNodeCount"]),
-                    html_byte_size=len(candidate.html.encode("utf-8")),
-                    visible_text_length=int(metrics["textLength"]),
-                    non_white_pixel_ratio=0.5,
-                    fallback_used=False,
-                )
-                if blank_page:
-                    status = "failure"
-                    error_type = "blank_render"
-                elif diagnostics.overflow_score >= 0.2:
-                    status = "failure"
-                    error_type = "severe_overflow"
-                elif console_errors or page_errors:
-                    status = "failure"
-                    error_type = "js_exception"
-        except PlaywrightTimeoutError:
-            status = "failure"
+            finally:
+                context.close()
+
+            overflow_x = max(0, int(metrics["scrollWidth"] - metrics["clientWidth"]))
+            overflow_y = max(0, int(metrics["scrollHeight"] - metrics["clientHeight"]))
+            overflow_score = max(
+                overflow_x / max(1, task.constraints.viewport.width),
+                overflow_y / max(1, task.constraints.viewport.height),
+            )
+            blank_page = len(visible_text.strip()) < 8
+            diagnostics = RenderDiagnostics(
+                blank_page=blank_page,
+                horizontal_overflow_px=overflow_x,
+                vertical_overflow_px=overflow_y,
+                overflow_score=round(float(min(1.0, overflow_score)), 4),
+                clipped_element_count=1 if overflow_score > 0.1 else 0,
+                tiny_text_count=0,
+                contrast_failure_count=0,
+                dom_node_count=int(metrics["domNodeCount"]),
+                html_byte_size=len(candidate.html.encode("utf-8")),
+                visible_text_length=int(metrics["textLength"]),
+                non_white_pixel_ratio=0.5,
+                fallback_used=False,
+            )
+            if blank_page:
+                error_type = "blank_render"
+            elif diagnostics.overflow_score >= 0.2:
+                error_type = "severe_overflow"
+            elif console_errors or page_errors:
+                error_type = "js_exception"
+        except playwright_timeout_error:
             error_type = "timeout"
         except Exception as exc:  # pragma: no cover - runtime dependent
-            status = "failure"
             error_type = error_type or "unknown_render_failure"
             page_errors.append(str(exc))
 
-        artifact = write_candidate_artifacts(
-            output_dir,
-            candidate.candidate_id,
-            candidate.html,
-            visible_text,
+        return _finalize_result(
+            output_dir=output_dir,
+            candidate=candidate,
+            started=started,
+            visible_text=visible_text,
             screenshot_bytes=screenshot_bytes,
-        )
-        result = RenderResult(
-            candidate_id=candidate.candidate_id,
-            render_status=status,
+            diagnostics=diagnostics,
             error_type=error_type,
-            traceback="\n".join(page_errors) if page_errors else None,
-            console_errors=console_errors,
             page_errors=page_errors,
+            console_errors=console_errors,
             failed_requests=failed_requests,
             network_violations=network_violations,
-            render_time_ms=int((time.time() - started) * 1000),
-            screenshot_ready=artifact.screenshot_path is not None,
-            diagnostics=diagnostics,
-            repair_hint=_repair_hint(error_type),
         )
-        return result, artifact
 
 
 def build_renderer(kind: str):
-    return PlaywrightRenderer() if kind == "playwright" else FallbackRenderer()
+    if kind == "playwright":
+        return PlaywrightRenderer()
+    return FallbackRenderer()
