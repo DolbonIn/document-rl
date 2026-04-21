@@ -19,6 +19,7 @@ from typing import Any
 
 from ..rewards import (
     aggregate_reward,
+    build_feedback_summary,
     compute_advantages,
     compute_fidelity,
 )
@@ -370,9 +371,10 @@ class HtmlFormattingEnv:
                 "diagnostic_penalty": reward_record.diagnostic_penalty,
                 "hacking_penalty": reward_record.hacking_penalty,
                 "overflow_score": render_result.diagnostics.overflow_score,
+                "page_count": len(artifact.page_screenshot_paths),
             },
             is_valid=True,
-            feedback="OK",
+            feedback=build_feedback_summary(artifact),
         )
 
     async def score_batch(

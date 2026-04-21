@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from pathlib import Path
 
 from .schemas import ArtifactRecord, RewardRecord, TaskSpec
 
@@ -57,6 +58,19 @@ def compute_hacking_penalty(artifact: ArtifactRecord) -> float:
     if any(needle in text for needle in suspicious):
         return 0.30
     return 0.0
+
+
+def build_feedback_summary(artifact: ArtifactRecord) -> str:
+    page_count = len(artifact.page_screenshot_paths)
+    if page_count == 0:
+        return "Rendered successfully. No page-level screenshots were extracted."
+    preview = ", ".join(Path(path).name for path in artifact.page_screenshot_paths[:3])
+    if page_count > 3:
+        preview = f"{preview}, ..."
+    return (
+        f"Rendered successfully. Extracted {page_count} page screenshots for review: "
+        f"{preview}"
+    )
 
 
 def aggregate_reward(
