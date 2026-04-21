@@ -70,6 +70,8 @@ def _finalize_result(
     started: float,
     visible_text: str,
     screenshot_bytes: bytes | None,
+    fullpage_screenshot_bytes: bytes | None,
+    page_screenshots: list[tuple[str, bytes]],
     diagnostics: RenderDiagnostics,
     error_type: str | None,
     page_errors: list[str] | None = None,
@@ -83,6 +85,8 @@ def _finalize_result(
         candidate.html,
         visible_text,
         screenshot_bytes=screenshot_bytes,
+        fullpage_screenshot_bytes=fullpage_screenshot_bytes,
+        page_screenshots=page_screenshots,
     )
     result = RenderResult(
         candidate_id=candidate.candidate_id,
@@ -124,9 +128,67 @@ class FallbackRenderer:
             started=started,
             visible_text=visible_text,
             screenshot_bytes=None,
+            fullpage_screenshot_bytes=None,
+            page_screenshots=[],
             diagnostics=diagnostics,
             error_type=error_type,
         )
+
+
+def _capture_deck_page_screenshots(
+    page: Any, candidate_id: str, viewport_width: int, viewport_height: int
+) -> list[tuple[str, bytes]]:
+    selector = None
+    for candidate_selector in [
+        "section.slide",
+        "[data-slide]",
+        "[data-page]",
+        "section.page",
+        "section",
+    ]:
+        if page.locator(candidate_selector).count() > 1:
+            selector = candidate_selector
+            break
+
+    if selector is None:
+        return []
+
+    total = page.locator(selector).count()
+    screenshots: list[tuple[str, bytes]] = []
+    for index in range(total):
+        page.evaluate(
+            """
+            ({ selector, index, viewportWidth, viewportHeight }) => {
+              const nodes = Array.from(document.querySelectorAll(selector));
+              nodes.forEach((node, nodeIndex) => {
+                const active = nodeIndex === index;
+                node.style.setProperty('position', 'absolute', 'important');
+                node.style.setProperty('left', '0px', 'important');
+                node.style.setProperty('top', '0px', 'important');
+                node.style.setProperty('width', `${viewportWidth}px`, 'important');
+                node.style.setProperty('height', `${viewportHeight}px`, 'important');
+                node.style.setProperty('visibility', active ? 'visible' : 'hidden', 'important');
+                node.style.setProperty('opacity', active ? '1' : '0', 'important');
+                node.style.setProperty('pointer-events', active ? 'auto' : 'none', 'important');
+                node.style.setProperty('z-index', active ? '2' : '1', 'important');
+              });
+            }
+            """,
+            {
+                "selector": selector,
+                "index": index,
+                "viewportWidth": viewport_width,
+                "viewportHeight": viewport_height,
+            },
+        )
+        page.wait_for_timeout(50)
+        screenshots.append(
+            (
+                f"{candidate_id}.page_{index + 1:03d}.png",
+                page.screenshot(type="png"),
+            )
+        )
+    return screenshots
 
 
 @dataclass
@@ -168,9 +230,11 @@ class PlaywrightRenderer:
 
         started = time.time()
         screenshot_bytes: bytes | None = None
+        fullpage_screenshot_bytes: bytes | None = None
         visible_text = ""
         console_errors: list[str] = []
         page_errors: list[str] = []
+        page_screenshots: list[tuple[str, bytes]] = []
         failed_requests: list[str] = []
         network_violations: list[str] = []
         error_type: str | None = None
@@ -182,6 +246,7 @@ class PlaywrightRenderer:
                     "width": task.constraints.viewport.width,
                     "height": task.constraints.viewport.height,
                 },
+                device_scale_factor=2,
                 locale="en-US",
                 timezone_id="UTC",
                 java_script_enabled=True,
@@ -205,7 +270,18 @@ class PlaywrightRenderer:
                 )
                 page.wait_for_timeout(300)
                 screenshot_bytes = page.screenshot(type="png")
+                fullpage_screenshot_bytes = page.screenshot(type="png", full_page=True)
                 visible_text = page.locator("body").inner_text(timeout=1000)
+                page_screenshots = _capture_deck_page_screenshots(
+                    page,
+                    candidate.candidate_id,
+                    task.constraints.viewport.width,
+                    task.constraints.viewport.height,
+                )
+                if not page_screenshots and screenshot_bytes is not None:
+                    page_screenshots = [
+                        (f"{candidate.candidate_id}.page_001.png", screenshot_bytes)
+                    ]
                 metrics = page.evaluate(
                     """
                     () => {
@@ -264,6 +340,8 @@ class PlaywrightRenderer:
             started=started,
             visible_text=visible_text,
             screenshot_bytes=screenshot_bytes,
+            fullpage_screenshot_bytes=fullpage_screenshot_bytes,
+            page_screenshots=page_screenshots,
             diagnostics=diagnostics,
             error_type=error_type,
             page_errors=page_errors,
