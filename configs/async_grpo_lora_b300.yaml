@@ -1,0 +1,68 @@
+# Async GRPO + LoRA configuration optimized for DGX-B300
+# GPU 0-1: vLLM inference server
+# GPU 2-5: LoRA training (4x B300)
+#
+# Usage:
+#   1. Start vLLM on GPU 0-1:
+#      CUDA_VISIBLE_DEVICES=0,1 vllm serve <model> --port 8000
+#   2. Run training on GPU 2-5:
+#      CUDA_VISIBLE_DEVICES=2,3,4,5 python -m ppt_rl.atropos.runner \
+#        --config configs/async_grpo_lora_b300.yaml
+
+# --- Environment (Atropos) ---
+env:
+  tasks_path: "examples/tasks.jsonl"
+  artifacts_dir: "/raid/html_rl_artifacts"
+  num_candidates_per_task: 4
+  renderer: "fallback"
+  reward_preset: "default"
+  seed: 42
+  max_new_tokens: 1024
+
+# --- Sampler (vLLM on GPU 0-1) ---
+sampler_type: "vllm"
+sampler:
+  api_base: "http://localhost:8000/v1"
+  model_name: "default"
+
+# --- Trainer (LoRA on GPU 2-5) ---
+trainer:
+  model_path: ""                 # Set to your base model
+  output_dir: "/raid/html_rl_output_b300"
+  device: "cuda:0"               # Relative to CUDA_VISIBLE_DEVICES
+  dtype: "bfloat16"
+
+  use_lora: true
+  lora:
+    r: 16
+    lora_alpha: 32
+    lora_dropout: 0.05
+    bias: "none"
+    task_type: "CAUSAL_LM"
+    target_modules:
+      - "q_proj"
+      - "k_proj"
+      - "v_proj"
+      - "o_proj"
+      - "gate_proj"
+      - "up_proj"
+      - "down_proj"
+
+  # GRPO - tuned for small dataset + B300
+  learning_rate: 1.0e-5
+  beta_kl: 0.02
+  clip_range: 0.2
+  max_grad_norm: 1.0
+  gradient_accumulation_steps: 8
+  warmup_steps: 10
+
+  max_steps: 500
+  save_every: 50
+  log_every: 10
+  rollout_buffer_size: 128
+
+temperature: 0.8
+top_p: 0.95
+max_tokens: 1024
+batch_size: 8                    # Larger batch for B300 throughput
+log_interval_seconds: 30.0

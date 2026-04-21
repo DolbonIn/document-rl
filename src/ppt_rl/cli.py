@@ -37,6 +37,20 @@ def build_parser() -> argparse.ArgumentParser:
     train_parser.add_argument("--epochs", type=int, default=1)
     train_parser.add_argument("--dry-run", action="store_true")
 
+    # Async GRPO + LoRA training via Atropos
+    async_parser = subparsers.add_parser(
+        "async-grpo",
+        help="Run async GRPO training with LoRA (Tinker-Atropos pattern)",
+    )
+    async_parser.add_argument(
+        "--config", required=True, help="Path to YAML configuration file"
+    )
+    async_parser.add_argument(
+        "--log-level",
+        default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+    )
+
     return parser
 
 
@@ -57,6 +71,18 @@ def main() -> None:
                 max_new_tokens=args.max_new_tokens,
             )
         )
+    elif args.command == "async-grpo":
+        import asyncio
+        import logging
+
+        logging.basicConfig(
+            level=getattr(logging, args.log_level),
+            format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        )
+        from .atropos.runner import load_run_config, run_async_grpo
+
+        config = load_run_config(args.config)
+        result = asyncio.run(run_async_grpo(config))
     else:
         result = train_grpo(
             TrainConfig(

@@ -1,0 +1,63 @@
+# Async GRPO + LoRA configuration for HTML document formatting
+# Usage: python -m ppt_rl.atropos.runner --config configs/async_grpo_lora.yaml
+
+# --- Environment (Atropos) ---
+env:
+  tasks_path: "examples/tasks.jsonl"
+  artifacts_dir: "/raid/html_rl_artifacts"
+  num_candidates_per_task: 4
+  renderer: "fallback"           # "fallback" (fast, heuristic) or "playwright" (accurate, slow)
+  reward_preset: "default"       # "default" | "structure_heavy" | "fidelity_heavy"
+  seed: 42
+  max_new_tokens: 768
+
+# --- Sampler (vLLM async inference) ---
+sampler_type: "vllm"            # "vllm" (production) or "local" (development)
+sampler:
+  api_base: "http://localhost:8000/v1"
+  model_name: "default"
+
+# --- Trainer (Tinker - LoRA GRPO) ---
+trainer:
+  model_path: ""                 # Base model path (HuggingFace ID or local path)
+  output_dir: "/raid/html_rl_output"
+  device: "cuda"
+  dtype: "bfloat16"
+
+  # LoRA configuration
+  use_lora: true
+  lora:
+    r: 16
+    lora_alpha: 32
+    lora_dropout: 0.05
+    bias: "none"
+    task_type: "CAUSAL_LM"
+    target_modules:
+      - "q_proj"
+      - "k_proj"
+      - "v_proj"
+      - "o_proj"
+      - "gate_proj"
+      - "up_proj"
+      - "down_proj"
+
+  # GRPO hyperparameters
+  learning_rate: 1.0e-5
+  beta_kl: 0.02
+  clip_range: 0.2
+  max_grad_norm: 1.0
+  gradient_accumulation_steps: 8
+  warmup_steps: 10
+
+  # Training loop
+  max_steps: 500
+  save_every: 50
+  log_every: 10
+  rollout_buffer_size: 64
+
+# --- Generation parameters ---
+temperature: 0.8
+top_p: 0.95
+max_tokens: 768
+batch_size: 4
+log_interval_seconds: 30.0

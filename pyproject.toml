@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ppt-rl"
-version = "0.1.0"
+version = "0.2.0"
 description = "Renderer-first GRPO pipeline for constrained HTML PPT/document generation"
 readme = "RL_PIPELINE_SPEC.md"
 requires-python = ">=3.10"
@@ -13,6 +13,7 @@ dependencies = []
 [project.optional-dependencies]
 train = ["torch>=2.2", "transformers>=4.40"]
 render = ["playwright>=1.44"]
+async-grpo = ["torch>=2.2", "transformers>=4.40", "peft>=0.11", "openai>=1.0", "pyyaml>=6.0"]
 
 [tool.setuptools]
 package-dir = {"" = "src"}
