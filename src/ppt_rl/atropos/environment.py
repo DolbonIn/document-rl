@@ -133,16 +133,28 @@ class EnvConfig:
     def effective_weights(self) -> dict[str, float]:
         preset = REWARD_PRESETS.get(self.reward_preset, REWARD_PRESETS["default"])
         return {
-            "structure_weight": self.structure_weight or preset["structure_weight"],
-            "visual_weight": self.visual_weight or preset["visual_weight"],
-            "fidelity_weight": self.fidelity_weight or preset["fidelity_weight"],
+            "structure_weight": (
+                self.structure_weight
+                if self.structure_weight is not None
+                else preset["structure_weight"]
+            ),
+            "visual_weight": (
+                self.visual_weight
+                if self.visual_weight is not None
+                else preset["visual_weight"]
+            ),
+            "fidelity_weight": (
+                self.fidelity_weight
+                if self.fidelity_weight is not None
+                else preset["fidelity_weight"]
+            ),
         }
 
 
 SYSTEM_PROMPT = (
     "You are an expert HTML/CSS document designer. Generate a single self-contained "
     "HTML page with inline CSS only. No external assets, no JavaScript. The output "
-    "must use <main class=\"slide\"> as the root container. Follow the task constraints "
+    'must use <main class="slide"> as the root container. Follow the task constraints '
     "exactly."
 )
 
@@ -158,7 +170,9 @@ def _build_user_prompt(task: TaskSpec) -> str:
     if task.constraints.must_include:
         parts.append(f"Must include: {', '.join(task.constraints.must_include)}")
     if task.constraints.must_not_include:
-        parts.append(f"Must NOT include: {', '.join(task.constraints.must_not_include)}")
+        parts.append(
+            f"Must NOT include: {', '.join(task.constraints.must_not_include)}"
+        )
     parts.append("Return only the complete HTML document.")
     return "\n".join(parts)
 
@@ -193,12 +207,20 @@ class HtmlFormattingEnv:
         """Load tasks and initialize renderer."""
         from ..task_sampler import load_tasks
 
-        if self.config.tasks_path:
-            self.tasks = load_tasks(Path(self.config.tasks_path))
+        if not self.config.tasks_path:
+            raise RuntimeError("env.tasks_path is required for async GRPO runs")
+
+        self.tasks = load_tasks(Path(self.config.tasks_path))
+        if not self.tasks:
+            raise RuntimeError(
+                f"No tasks found for async GRPO run: {self.config.tasks_path}"
+            )
+
         self._artifacts_dir.mkdir(parents=True, exist_ok=True)
 
         if self.config.renderer == "playwright":
             from ..renderers import PlaywrightRenderer
+
             self._renderer = PlaywrightRenderer()
 
         logger.info(

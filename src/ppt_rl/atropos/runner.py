@@ -24,6 +24,15 @@ from .trainer import AsyncGRPOTrainer, LoRAConfig, TrainerConfig
 logger = logging.getLogger(__name__)
 
 
+def _validate_run_config(config: RunConfig) -> None:
+    if not config.env.tasks_path:
+        raise RuntimeError("env.tasks_path is required for async GRPO runs")
+    if not Path(config.env.tasks_path).exists():
+        raise RuntimeError(f"env.tasks_path does not exist: {config.env.tasks_path}")
+    if not config.trainer.model_path.strip():
+        raise RuntimeError("trainer.model_path is required for async GRPO runs")
+
+
 @dataclass
 class RunConfig:
     """Top-level run configuration."""
@@ -46,6 +55,9 @@ def load_run_config(path: str | Path) -> RunConfig:
     with open(path, "r") as f:
         raw = yaml.safe_load(f)
 
+    if not isinstance(raw, dict):
+        raise RuntimeError(f"Invalid async GRPO config: {path}")
+
     env_cfg = EnvConfig(**raw.get("env", {}))
 
     trainer_raw = raw.get("trainer", {})
@@ -53,7 +65,7 @@ def load_run_config(path: str | Path) -> RunConfig:
     lora_cfg = LoRAConfig(**lora_raw) if lora_raw else LoRAConfig()
     trainer_cfg = TrainerConfig(**trainer_raw, lora=lora_cfg)
 
-    return RunConfig(
+    config = RunConfig(
         env=env_cfg,
         trainer=trainer_cfg,
         sampler_type=raw.get("sampler_type", "vllm"),
@@ -64,6 +76,8 @@ def load_run_config(path: str | Path) -> RunConfig:
         batch_size=raw.get("batch_size", 4),
         log_interval_seconds=raw.get("log_interval_seconds", 30.0),
     )
+    _validate_run_config(config)
+    return config
 
 
 async def run_async_grpo(config: RunConfig) -> dict[str, Any]:
