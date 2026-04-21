@@ -197,6 +197,7 @@ class ArtifactRecord:
     dom_path: str | None
     visible_text: str
     artifact_hashes: dict[str, str]
+    page_screenshot_paths: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
