@@ -218,10 +218,10 @@ class HtmlFormattingEnv:
 
         self._artifacts_dir.mkdir(parents=True, exist_ok=True)
 
-        if self.config.renderer == "playwright":
-            from ..renderers import PlaywrightRenderer
+        if self.config.renderer != "fallback":
+            from ..renderers import build_renderer
 
-            self._renderer = PlaywrightRenderer()
+            self._renderer = build_renderer(self.config.renderer)
 
         logger.info(
             "HtmlFormattingEnv ready: %d tasks, renderer=%s, weights=%s",
@@ -413,6 +413,9 @@ class HtmlFormattingEnv:
 
     async def cleanup(self) -> None:
         """Cleanup resources."""
+        close = getattr(self._renderer, "close", None)
+        if callable(close):
+            close()
         logger.info(
             "HtmlFormattingEnv cleanup: scored %d candidates across %d epochs",
             self._total_scored,
