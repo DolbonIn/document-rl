@@ -1,0 +1,5 @@
+.ruff_cache/
+.maestro-traces/
+outputs/
+__pycache__/
+*.pyc
