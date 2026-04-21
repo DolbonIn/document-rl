@@ -100,9 +100,7 @@ class VLLMSampler:
                 # Extract logprobs if available
                 token_logprobs: list[float] = []
                 if choice.logprobs and choice.logprobs.content:
-                    token_logprobs = [
-                        t.logprob for t in choice.logprobs.content
-                    ]
+                    token_logprobs = [t.logprob for t in choice.logprobs.content]
 
                 return SamplerOutput(
                     problem_id=problem.problem_id,
@@ -143,6 +141,8 @@ class LocalSampler:
     async def _ensure_model(self) -> None:
         if self._model is not None:
             return
+        if not self.model_path.strip():
+            raise RuntimeError("LocalSampler requires a non-empty model_path")
         torch = importlib.import_module("torch")
         transformers = importlib.import_module("transformers")
 
@@ -150,14 +150,12 @@ class LocalSampler:
         self._model = transformers.AutoModelForCausalLM.from_pretrained(
             self.model_path,
             torch_dtype=torch.bfloat16,
-            device_map=self.device,
         )
+        self._model = self._model.to(self.device)
 
         if self.lora_path:
             peft = importlib.import_module("peft")
-            self._model = peft.PeftModel.from_pretrained(
-                self._model, self.lora_path
-            )
+            self._model = peft.PeftModel.from_pretrained(self._model, self.lora_path)
             logger.info("Loaded LoRA adapter from %s", self.lora_path)
 
         if self._tokenizer.pad_token_id is None:
@@ -221,5 +219,9 @@ class LocalSampler:
 def build_sampler(kind: str, **kwargs: Any) -> AsyncSamplerBackend:
     """Factory for sampler backends."""
     if kind == "vllm":
-        return VLLMSampler(**{k: v for k, v in kwargs.items() if k in VLLMSampler.__dataclass_fields__})
-    return LocalSampler(**{k: v for k, v in kwargs.items() if k in LocalSampler.__dataclass_fields__})
+        return VLLMSampler(
+            **{k: v for k, v in kwargs.items() if k in VLLMSampler.__dataclass_fields__}
+        )
+    return LocalSampler(
+        **{k: v for k, v in kwargs.items() if k in LocalSampler.__dataclass_fields__}
+    )

@@ -24,6 +24,14 @@ from .sampler import SamplerOutput
 logger = logging.getLogger(__name__)
 
 
+def _load_causal_lm(transformers: Any, model_path: str, dtype: Any, device: str) -> Any:
+    model = transformers.AutoModelForCausalLM.from_pretrained(
+        model_path,
+        torch_dtype=dtype,
+    )
+    return model.to(device)
+
+
 @dataclass
 class LoRAConfig:
     """LoRA adapter configuration."""
@@ -130,6 +138,9 @@ class AsyncGRPOTrainer:
         torch = importlib.import_module("torch")
         transformers = importlib.import_module("transformers")
 
+        if not self.config.model_path.strip():
+            raise RuntimeError("trainer.model_path is required for async GRPO runs")
+
         dtype_map = {
             "bfloat16": torch.bfloat16,
             "float16": torch.float16,
@@ -144,10 +155,11 @@ class AsyncGRPOTrainer:
         if self._tokenizer.pad_token_id is None:
             self._tokenizer.pad_token = self._tokenizer.eos_token
 
-        self._model = transformers.AutoModelForCausalLM.from_pretrained(
+        self._model = _load_causal_lm(
+            transformers,
             self.config.model_path,
-            torch_dtype=dtype,
-            device_map=self.config.device,
+            dtype,
+            self.config.device,
         )
 
         # Apply LoRA adapter
@@ -174,10 +186,11 @@ class AsyncGRPOTrainer:
             )
 
         # Reference model (frozen copy for KL computation)
-        self._ref_model = transformers.AutoModelForCausalLM.from_pretrained(
+        self._ref_model = _load_causal_lm(
+            transformers,
             self.config.model_path,
-            torch_dtype=dtype,
-            device_map=self.config.device,
+            dtype,
+            self.config.device,
         )
         self._ref_model.eval()
         for p in self._ref_model.parameters():
@@ -249,6 +262,16 @@ class AsyncGRPOTrainer:
         """Execute one GRPO training step from the rollout buffer."""
         if not self._rollout_buffer:
             return None
+        if (
+            self._model is None
+            or self._tokenizer is None
+            or self._ref_model is None
+            or self._optimizer is None
+            or self._scheduler is None
+        ):
+            raise RuntimeError(
+                "AsyncGRPOTrainer.setup() must be called before train_step"
+            )
 
         torch = importlib.import_module("torch")
         record = self._rollout_buffer.popleft()
@@ -279,8 +302,8 @@ class AsyncGRPOTrainer:
         completion_mask = torch.zeros_like(log_probs)
         completion_mask[:, prompt_len:] = 1.0
         masked_log_probs = (
-            (log_probs * completion_mask).sum() / completion_mask.sum().clamp(min=1)
-        )
+            log_probs * completion_mask
+        ).sum() / completion_mask.sum().clamp(min=1)
 
         # Reference model logprobs for KL
         with torch.no_grad():
@@ -292,9 +315,8 @@ class AsyncGRPOTrainer:
                 .squeeze(-1)
             )
             masked_ref_log_probs = (
-                (ref_log_probs * completion_mask).sum()
-                / completion_mask.sum().clamp(min=1)
-            )
+                ref_log_probs * completion_mask
+            ).sum() / completion_mask.sum().clamp(min=1)
 
         # Old policy logprobs
         if record.old_logprobs:
@@ -384,6 +406,11 @@ class AsyncGRPOTrainer:
 
     async def save_checkpoint(self, tag: str | None = None) -> str:
         """Save LoRA adapter (or full model) checkpoint."""
+        if self._model is None or self._tokenizer is None:
+            raise RuntimeError(
+                "AsyncGRPOTrainer.setup() must be called before save_checkpoint"
+            )
+
         suffix = tag or f"step_{self._step}"
         save_path = Path(self.config.output_dir) / f"checkpoint-{suffix}"
         save_path.mkdir(parents=True, exist_ok=True)
@@ -447,5 +474,7 @@ class AsyncGRPOTrainer:
                 if self._losses
                 else 0.0
             ),
-            "elapsed_seconds": time.time() - self._start_time if self._start_time else 0,
+            "elapsed_seconds": time.time() - self._start_time
+            if self._start_time
+            else 0,
         }
